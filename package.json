@@ -1,0 +1,22 @@
+{
+  "name": "rock-paper-scissors-contract",
+  "version": "1.0.0",
+  "description": "A Tezos contract to play Rock, Paper, Scissors on-chain",
+  "main": "index.js",
+  "scripts": {
+    "watch": "nodemon --ext mligo --exec ligo compile contract ./contract.mligo --protocol ithaca",
+    "test": "nodemon --watch tests/contract.test.mligo --ext mligo --exec node tests/index.mjs"
+  },
+  "keywords": [
+    "Tezos",
+    "smart-contract",
+    "blockchain"
+  ],
+  "author": "Claude Barde",
+  "license": "ISC",
+  "devDependencies": {
+    "chalk": "^5.0.1",
+    "nodemon": "^2.0.16",
+    "zx": "^6.1.0"
+  }
+}
