@@ -4,7 +4,7 @@
   "description": "A Tezos contract to play Rock, Paper, Scissors on-chain",
   "main": "index.js",
   "scripts": {
-    "watch": "nodemon --ext mligo --exec ligo compile contract ./contract.mligo --protocol ithaca",
+    "watch": "nodemon --ext mligo --exec ligo compile contract ./contract-jackpot.mligo --protocol ithaca",
     "test": "nodemon --watch tests/contract.test.mligo --ext mligo --exec node tests/index.mjs"
   },
   "keywords": [

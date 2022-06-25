@@ -2,6 +2,7 @@ type games_results =
 {
     won: { amount: nat; total: tez };
     lost: nat;
+    wins_in_a_row: nat;
     last_game: { player: nat; contract: nat };
 }
 
@@ -13,15 +14,18 @@ type mvp =
 
 type storage =
 {
-    played_games: nat;
-    players: (address, games_results) big_map;
-    prize: tez;
-    mul_factor: nat;
-    admin: address;
-    randomizer_address: address;
-    randomizer_creator: address;
-    paused: bool;
-    mvp: mvp option;
+    played_games        : nat;
+    players             : (address, games_results) big_map;
+    prize               : tez;
+    play_fee            : tez;
+    admin               : address;
+    randomizer_address  : address;
+    randomizer_creator  : address;
+    paused              : bool;
+    mvp                 : mvp option;
+    jackpot             : tez;
+    jackpot_factor      : nat;
+    accrued_fees        : tez;
 }
 
 type parameter =
@@ -32,7 +36,8 @@ type parameter =
 | Update_randomizer_address of address
 | Update_randomizer_creator of address
 | Update_prize of tez
-| Update_mul_factor of nat
+| Update_play_fee of tez
+| Update_jackpot_factor of nat
 | Pause
 
 type return = operation list * storage
@@ -45,10 +50,10 @@ let is_admin (addr: address) (s: storage): bool =
 *)
 let play (s, player_input: storage * nat): return =
     // checks that the user has attached the correct amount to play
-    if Tezos.get_amount () <> s.prize
+    if Tezos.get_amount () <> s.prize + s.play_fee
     then (failwith "INCORRECT_AMOUNT": return)
     // checks that the contract has enough balance in case of a win
-    else if Tezos.get_balance () < s.prize * s.mul_factor
+    else if Tezos.get_balance () < s.jackpot
     then (failwith "INSUFFICIENT_PRIZE_BALANCE": return)
     else
         // gets random value from randomizer
@@ -66,32 +71,47 @@ let play (s, player_input: storage * nat): return =
         in
         let game_data = { player = player_input ; contract = random_nat } in
         
-        let (ops, (new_players, mvp)): operation list * ((address, games_results) big_map * (mvp option)) = 
+        let (ops, new_storage): operation list * storage = 
             if outcome = true
             then
-                let target: unit contract = Tezos.get_contract_with_error (Tezos.get_sender ()) "UNABLE_TO_FIND_PLAYER_ADDRESS" in
-                let prize = s.prize * s.mul_factor in
-                let win_op = [Tezos.transaction unit prize target] in
-                let (new_players, new_mvp) = 
+                let { new_players; new_mvp; won_jackpot } = 
                     match Big_map.find_opt (Tezos.get_sender ()) s.players with
                     | None -> 
                         let new_players = 
                             Big_map.add 
                                 (Tezos.get_sender ()) 
-                                { won = { amount = 1n; total = prize } ; lost = 0n ; last_game = game_data } 
+                                { 
+                                    won = { amount = 1n; total = s.prize + 100_000mutez } ; 
+                                    lost = 0n ; 
+                                    last_game = game_data ;
+                                    wins_in_a_row = 1n ;
+                                } 
                                 s.players
                         in
                         let new_mvp = 
                             match s.mvp with 
                             | None -> { player = Tezos.get_sender () ; wins = 1n }
                             | Some last_mvp -> last_mvp
-                        in new_players, new_mvp
+                        in { new_players = new_players; new_mvp = new_mvp ; won_jackpot = false }
                     | Some val -> 
+                        let won_jackpot = (val.wins_in_a_row + 1n) = s.jackpot_factor in
                         let new_wins = val.won.amount + 1n in
+                        let new_total = if won_jackpot then (val.won.total + s.jackpot) else (val.won.total + 100_000mutez) in
                         let new_players = 
                             Big_map.update 
                                 (Tezos.get_sender ()) 
-                                (Some ({ val with won = { amount = new_wins ; total = val.won.total + prize } ; last_game = game_data })) 
+                                (Some ({ 
+                                    val with 
+                                        won = { 
+                                                amount = new_wins ; 
+                                                total = new_total ;
+                                        } ; 
+                                        last_game = game_data ;
+                                        wins_in_a_row = 
+                                            if won_jackpot
+                                            then 0n 
+                                            else val.wins_in_a_row + 1n
+                                })) 
                                 s.players
                         in
                         let new_mvp = 
@@ -101,24 +121,47 @@ let play (s, player_input: storage * nat): return =
                                 (if last_mvp.wins < new_wins 
                                 then { player = Tezos.get_sender () ; wins = new_wins }
                                 else last_mvp)
-                        in new_players, new_mvp
+                        in { new_players = new_players; new_mvp = new_mvp ; won_jackpot = won_jackpot }
                     in
-                win_op, (new_players, (Some new_mvp))
+                // forges the transaction to the winner
+                let target: unit contract = Tezos.get_contract_with_error (Tezos.get_sender ()) "UNABLE_TO_FIND_PLAYER_ADDRESS" in
+                let win_op = 
+                    if won_jackpot
+                    then [Tezos.transaction unit s.jackpot target]
+                    else [Tezos.transaction unit (s.prize + 100_000mutez) target]
+                in
+
+                win_op,
+                {
+                    s with
+                        played_games    = s.played_games + 1n;
+                        players         = new_players;
+                        mvp             = Some new_mvp;
+                        jackpot         = if won_jackpot then 0tez else s.jackpot
+                }
             else
                 let new_players =
                     match Big_map.find_opt (Tezos.get_sender ()) s.players with
-                    | None -> Big_map.add (Tezos.get_sender ()) { won = { amount = 0n ; total = 0tez } ; lost = 1n ; last_game = game_data } s.players
-                    | Some val -> Big_map.update (Tezos.get_sender ()) (Some ({ val with lost = val.lost + 1n ; last_game = game_data })) s.players
-                in ([]: operation list), (new_players, s.mvp)
+                    | None -> 
+                        Big_map.add 
+                            (Tezos.get_sender ()) 
+                            { won = { amount = 0n ; total = 0tez } ; lost = 1n ; last_game = game_data; wins_in_a_row = 0n } 
+                            s.players
+                    | Some val -> 
+                        Big_map.update 
+                            (Tezos.get_sender ()) 
+                            (Some ({ val with lost = val.lost + 1n ; last_game = game_data; wins_in_a_row = 0n })) 
+                            s.players
+                in ([]: operation list), 
+                {
+                    s with
+                        played_games    = s.played_games + 1n;
+                        players         = new_players;
+                        jackpot         = s.jackpot + s.prize
+                }
         in
             
-        ops,
-        {
-            s with
-                played_games    = s.played_games + 1n;
-                players         = new_players;
-                mvp             = mvp;
-        }
+        ops, { new_storage with accrued_fees = new_storage.accrued_fees + new_storage.play_fee }
 
 (*
     ENTRYPOINT TO WITHDRAW CONTRACT BALANCE
@@ -204,13 +247,22 @@ let update_prize (s, new_prize: storage * tez): storage =
         { s with prize = new_prize }
 
 (*
-    ENTRYPOINT TO UPDATE THE MULTIPLICATION FACTOR FOR THE PRIZE
+    ENTRYPOINT TO UPDATE THE PLAY FEE
 *)
-let update_mul_factor (s, new_mul_factor: storage * nat): storage =
+let update_play_fee (s, new_fee: storage * tez): storage =
     if not is_admin (Tezos.get_sender ()) s
     then (failwith "NOT_AN_ADMIN": storage)
     else
-        { s with mul_factor = new_mul_factor }
+        { s with play_fee = new_fee }
+
+(*
+    ENTRYPOINT TO UPDATE THE MULTIPLICATION FACTOR FOR THE PRIZE
+*)
+let update_jackpot_factor (s, new_jackpot_factor: storage * nat): storage =
+    if not is_admin (Tezos.get_sender ()) s
+    then (failwith "NOT_AN_ADMIN": storage)
+    else
+        { s with jackpot_factor = new_jackpot_factor }
 
 (*
     ENTRYPOINT TO PAUSE/UNPAUSE THE CONTRACT
@@ -230,7 +282,8 @@ let main (action, store : parameter * storage) : return =
     | Update_randomizer_address addr -> ([]: operation list), update_randomizer_address (store, addr)
     | Update_randomizer_creator addr -> ([]: operation list), update_randomizer_creator (store, addr)
     | Update_prize p -> ([]: operation list), update_prize (store, p)
-    | Update_mul_factor p -> ([]: operation list), update_mul_factor (store, p)
+    | Update_play_fee p -> ([]: operation list), update_play_fee (store, p)
+    | Update_jackpot_factor p -> ([]: operation list), update_jackpot_factor (store, p)
     | Pause -> ([]: operation list), pause store
 
 [@view]
